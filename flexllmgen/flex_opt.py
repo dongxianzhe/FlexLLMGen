@@ -20,8 +20,6 @@ from flexllmgen.utils import ValueHolder, array_1d, array_2d, array_3d
 from flexllmgen.utils import GB, str2bool, torch_dtype_to_np_dtype, write_benchmark_log
 
 
-DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-
 @dataclass(frozen=True)
 class Task:
     """A generation task."""
@@ -114,22 +112,10 @@ def init_weight_list(weight_specs, policy, env):
 
         if not compress:
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
+            weight.load_from_np_file(weight_specs[i][2])
         else:
-            weight = home.compressed_device.allocate(
-                shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
-
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                for i in range(2):
-                    x = weight.data[i]
-                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+            weight = home.compressed_device.allocate(shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
+            weight.load_from_np_file(weight_specs[i][2])
 
         ret.append(weight)
     return ret
@@ -645,7 +631,7 @@ class OptLM:
         expanded_path = os.path.abspath(os.path.expanduser(
             os.path.join(self.path, f"{self.config.name}-np")))
         check_path = os.path.join(expanded_path, "decoder.embed_positions.weight")
-        if not os.path.exists(check_path) and DUMMY_WEIGHT not in check_path:
+        if not os.path.exists(check_path):
             download_opt_weights(self.config.name, self.path)
 
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
@@ -1106,14 +1092,13 @@ def run_flexllmgen(args):
     _, gpu_peak_mem = gpu.mem_stats()
     _, cpu_peak_mem = cpu.mem_stats()
 
-    if DUMMY_WEIGHT not in args.path:
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        show_str = "Outputs:\n" + 70 * '-' + "\n"
-        for i in range(len(outputs)):
-            show_str += f"{i}: {outputs[i]}\n"
-            show_str += "-" * 70 + "\n"
-        if args.verbose >= 2:
-            print(show_str)
+    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+    show_str = "Outputs:\n" + 70 * '-' + "\n"
+    for i in range(len(outputs)):
+        show_str += f"{i}: {outputs[i]}\n"
+        show_str += "-" * 70 + "\n"
+    if args.verbose >= 2:
+        print(show_str)
 
     gpu.print_stats()
     cpu.print_stats()
