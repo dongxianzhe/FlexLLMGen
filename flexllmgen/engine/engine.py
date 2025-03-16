@@ -105,16 +105,14 @@ class Engine:
         # Intermediate tensors
         # The following buffers store values used
         # for the i-th token, j-th layer, k-th gpu batch.
-        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
-
         # cache[j][k]
-        self.cache_home = array_2d(num_layers, num_gpu_batches)
-        self.cache_read_buf = array_2d(num_layers, num_gpu_batches)
-        self.cache_write_buf = array_2d(num_layers, num_gpu_batches)
+        self.cache_home = array_2d(self.num_layers, self.num_gpu_batches)
+        self.cache_read_buf = array_2d(self.num_layers, self.num_gpu_batches)
+        self.cache_write_buf = array_2d(self.num_layers, self.num_gpu_batches)
         # weight[j]
-        self.weight_read_buf = array_1d(num_layers)
+        self.weight_read_buf = array_1d(self.num_layers)
         # attention_mask[k]
-        self.attention_mask = array_1d(num_gpu_batches)
+        self.attention_mask = array_1d(self.num_gpu_batches)
 
         self.task = None
         self.init_all_weights()
@@ -302,63 +300,55 @@ class Engine:
         self.attention_mask[k].store(val)
 
     def generate(self, task: Task):
-        num_gpu_batches = self.num_gpu_batches
-        gpu_batch_size = self.policy.gpu_batch_size
-        overlap = self.policy.overlap
-        prompt_len, gen_len = task.prompt_len, task.gen_len
-        self.execute_gen_len = task.gen_len
-
         # Output token ids
-        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
+        self.output_ids = np.full((len(task.inputs), task.prompt_len + task.gen_len), self.config.pad_token_id, dtype=np.int32)
         self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
-        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
-        assert gpu_batch_size * num_gpu_batches == len(task.inputs)
-
+        self.output_ids[:, :task.prompt_len] = np.asarray(task.inputs)
+        assert self.policy.gpu_batch_size * self.num_gpu_batches == len(task.inputs)
         # Intermediate tensors
         # The following buffers store values used
         # for the i-th token, j-th layer, k-th gpu batch.
-        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
+        for j in range(self.num_layers):
+            for k in range(self.num_gpu_batches):
                 self.cache_home[j][k].clear()
                 self.cache_read_buf[j][k].clear()
                 self.cache_write_buf[j][k].clear()
-        for j in range(num_layers):
+        for j in range(self.num_layers):
             self.weight_read_buf[j].clear()
-        for k in range(num_gpu_batches):
+        for k in range(self.num_gpu_batches):
             self.attention_mask[k].clear()
-        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches)
+        self.hidden = array_3d(task.gen_len, self.num_layers, self.num_gpu_batches)
 
         # Init cache
         self.set_task(task)
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
+        for j in range(self.num_layers):
+            for k in range(self.num_gpu_batches):
                 self.init_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
 
         # Generate
-        if not overlap:
+        if not self.policy.overlap:
             # No overlap, easy to understand, suitable for debugging
-            self.generation_loop_normal()
+            self.generation_loop_normal(task)
         else:
             # Overlap I/O and compute
-            if num_gpu_batches == 1:
-                self.generation_loop_overlap_single_batch()
+            if self.num_gpu_batches == 1:
+                self.generation_loop_overlap_single_batch(task)
             else:
-                self.generation_loop_overlap_multi_batch()
+                self.generation_loop_overlap_multi_batch(task)
 
         # Delete cache
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
+        for j in range(self.num_layers):
+            for k in range(self.num_gpu_batches):
                 self.delete_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.del_attention_compute_workspace()
 
         return self.output_ids
 
-    def generation_loop_normal(self):
-        for i in range(self.execute_gen_len):
+    def generation_loop_normal(self, task: Task):
+        for i in range(task.gen_len):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
                 self.update_attention_mask(i, k)
@@ -374,14 +364,14 @@ class Engine:
                     self.store_cache(i, j, k, overlap=False)
             timers("generate").stop()
 
-    def generation_loop_overlap_single_batch(self):
+    def generation_loop_overlap_single_batch(self, task: Task):
         # Prologue
         for k in range(self.num_gpu_batches):
             self.load_weight(0, 0, k)
         self.sync()
 
         # Generate
-        for i in range(self.execute_gen_len):
+        for i in range(task.gen_len):
             timers("generate").start()
             self.update_attention_mask(i, 0)
             for j in range(self.num_layers):
@@ -397,7 +387,7 @@ class Engine:
             if self.task.stop and np.all(self.stopped):
                 break
 
-    def generation_loop_overlap_multi_batch(self):
+    def generation_loop_overlap_multi_batch(self, task: Task):
         # Prologue
         for k in range(self.num_gpu_batches):
             self.load_weight(0, 0, k)
@@ -405,7 +395,7 @@ class Engine:
         self.sync()
 
         # Generate
-        for i in range(self.execute_gen_len):
+        for i in range(task.gen_len):
             timers("generate").start()
             for k in range(self.num_gpu_batches):
                 self.update_attention_mask(i, k)
@@ -421,8 +411,7 @@ class Engine:
             timers("generate").stop()
 
         # Epilogue
-        self.store_hidden(
-            self.execute_gen_len-1, self.num_layers-1, self.num_gpu_batches-1)
+        self.store_hidden(task.gen_len - 1, self.num_layers - 1, self.num_gpu_batches - 1)
 
 
     def __del__(self):
