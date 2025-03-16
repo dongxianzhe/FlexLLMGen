@@ -13,11 +13,11 @@ from typing import Union, List, Optional
 from transformers import AutoTokenizer
 
 from flexllmgen.layer import Layer
-from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy
+from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy, DeviceType
 from flexllmgen import OptConfig, get_opt_config, download_opt_weights
 from flexllmgen.utils import timers
 from flexllmgen.utils import ValueHolder, array_1d, array_2d, array_3d
-from flexllmgen.utils import GB, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log
+from flexllmgen.utils import GB, str2bool, torch_dtype_to_np_dtype, write_benchmark_log
 
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
@@ -28,7 +28,6 @@ class Task:
     inputs: Union[np.array, List[List[int]]]
     prompt_len: int
     gen_len: int
-    cut_gen_len: Optional[int]
 
     do_sample: bool
     temperature: float
@@ -656,8 +655,6 @@ class OptLM:
         if j == self.num_layers:
             j = 0
             i += 1
-            if i == self.execute_gen_len:
-                return
 
         # Load from weight_home to weight_read_buf
         if overlap:
@@ -690,8 +687,6 @@ class OptLM:
         if j == self.num_layers:
             j = 0
             i += 1
-            if i == self.execute_gen_len:
-                return
 
         # Load from cache_home to cache_read_buf
         if overlap:
@@ -736,8 +731,6 @@ class OptLM:
         if j == self.num_layers:
             j = 0
             i += 1
-            if i == self.execute_gen_len:
-                return
 
         # Load to hidden states buffers
         dst = self.layers[j].compute
@@ -831,14 +824,11 @@ class OptLM:
                  do_sample: bool = False,
                  temperature: float = 1.0,
                  stop: Optional[int] = None,
-                 debug_mode: Optional[str] = None,
-                 cut_gen_len: Optional[int] = None,
                  verbose: int = 0):
         task = Task(
             inputs=inputs,
             prompt_len=len(inputs[0]),
             gen_len=max_new_tokens,
-            cut_gen_len=cut_gen_len,
             do_sample=do_sample,
             temperature=temperature,
             stop=stop,
@@ -848,7 +838,7 @@ class OptLM:
         gpu_batch_size = self.policy.gpu_batch_size
         overlap = self.policy.overlap
         prompt_len, gen_len = task.prompt_len, task.gen_len
-        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
+        self.execute_gen_len = task.gen_len
 
         # Output token ids
         self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
@@ -880,27 +870,15 @@ class OptLM:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
 
         # Generate
-        if debug_mode is None:
-            if not overlap:
-                # No overlap, easy to understand, suitable for debugging
-                self.generation_loop_normal()
-            else:
-                # Overlap I/O and compute
-                if num_gpu_batches == 1:
-                    self.generation_loop_overlap_single_batch()
-                else:
-                    self.generation_loop_overlap_multi_batch()
-        elif debug_mode == "fewer_batch":
-            # Run fewer layeres and batches for debugging
-            if num_gpu_batches == 1:
-                self.generation_loop_debug_single_batch()
-            else:
-                self.generation_loop_debug_multi_batch()
-        elif debug_mode == "breakdown":
-            # No overlap, fewer batches, execution time breakdown
-            self.generation_loop_debug_normal()
+        if not overlap:
+            # No overlap, easy to understand, suitable for debugging
+            self.generation_loop_normal()
         else:
-            raise ValueError("Invalid debug mode: {debug_mode}")
+            # Overlap I/O and compute
+            if num_gpu_batches == 1:
+                self.generation_loop_overlap_single_batch()
+            else:
+                self.generation_loop_overlap_multi_batch()
 
         # Delete cache
         for j in range(num_layers):
@@ -1033,120 +1011,6 @@ class OptLM:
             if self.task.stop and np.all(self.stopped):
                 break
 
-    def generation_loop_overlap_multi_batch(self):
-        # Prologue
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
-        self.load_hidden(0, 0, 0)
-        self.sync()
-
-        # Generate
-        for i in range(self.execute_gen_len):
-            timers("generate").start()
-            for k in range(self.num_gpu_batches):
-                self.update_attention_mask(i, k)
-            for j in range(self.num_layers):
-                for k in range(self.num_gpu_batches):
-                    self.load_weight(i, j+1, k)
-                    self.load_cache(i, j, k+1)
-                    self.store_hidden(i, j, k-1)
-                    self.load_hidden(i, j, k+1)
-                    self.compute_layer(i, j, k)
-                    self.store_cache(i, j, k-1)
-                    self.sync()
-            timers("generate").stop()
-
-        # Epilogue
-        self.store_hidden(
-            self.execute_gen_len-1, self.num_layers-1, self.num_gpu_batches-1)
-
-    def generation_loop_debug_single_batch(self):
-        execute_num_batches = 20
-        batch_ct = 0
-        pbar = tqdm(total=execute_num_batches)
-        timers("prefill").reset()
-        timers("decoding_gpu_batch").reset()
-
-        # Prologue
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
-        self.sync()
-
-        # Generate
-        for i in range(self.execute_gen_len):
-            if i == 0: timers("prefill").start()
-            self.update_attention_mask(i, 0)
-            for j in range(self.num_layers):
-                if i > 0: timers("decoding_gpu_batch").start()
-                self.load_weight(i, j+1, 0)
-                self.load_cache(i, j+1, 0)
-                self.load_hidden(i, j, 0)
-                self.compute_layer(i, j, 0)
-                self.store_cache(i, j-1, 0)
-                self.store_hidden(i, j, 0)
-                self.sync()
-
-                if i > 0:
-                    timers("decoding_gpu_batch").stop()
-                    pbar.update(1)
-                    batch_ct += 1
-                if batch_ct >= execute_num_batches: break
-            if batch_ct >= execute_num_batches: break
-            if i == 0: timers("prefill").stop()
-
-        # Convert "decoding_gpu_batch" timer to "generate" timer
-        batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        for i in range(self.execute_gen_len):
-            if i == 0:
-                timers("generate").costs.append(timers("prefill").costs[0])
-            else:
-                timers("generate").costs.append(self.num_layers * batch_cost)
-
-    def generation_loop_debug_multi_batch(self):
-        execute_num_batches = 20
-        batch_ct = 0
-        pbar = tqdm(total=execute_num_batches)
-        timers("prefill").reset()
-        timers("decoding_gpu_batch").reset()
-
-        # Prologue
-        for k in range(self.num_gpu_batches):
-            self.load_weight(0, 0, k)
-        self.load_hidden(0, 0, 0)
-        self.sync()
-
-        # Generate
-        for i in range(self.execute_gen_len):
-            if i == 0: timers("prefill").start()
-            for k in range(self.num_gpu_batches):
-                self.update_attention_mask(i, k)
-            for j in range(self.num_layers):
-                if i > 0: timers("decoding_gpu_batch").start()
-                for k in range(self.num_gpu_batches):
-                    self.load_weight(i, j+1, k)
-                    self.load_cache(i, j, k+1)
-                    self.store_hidden(i, j, k-1)
-                    self.load_hidden(i, j, k+1)
-                    self.compute_layer(i, j, k)
-                    self.store_cache(i, j, k-1)
-                    self.sync()
-
-                if i > 0:
-                    timers("decoding_gpu_batch").stop()
-                    pbar.update(1)
-                    batch_ct += 1
-                if batch_ct >= execute_num_batches: break
-            if batch_ct >= execute_num_batches: break
-            if i == 0: timers("prefill").stop()
-
-        # Convert "decoding_gpu_batch" timer to "generate" timer
-        batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        for i in range(self.execute_gen_len):
-            if i == 0:
-                timers("generate").costs.append(timers("prefill").costs[0])
-            else:
-                timers("generate").costs.append(self.num_layers * batch_cost)
-
     def __del__(self):
         self.delete_all_weights()
 
@@ -1173,8 +1037,7 @@ def get_filename(args):
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
     prompts = ["Paris is the capital city of"]
-    input_ids = tokenizer(prompts, padding="max_length",
-                          max_length=prompt_len).input_ids
+    input_ids = tokenizer(prompts, padding="max_length", max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
 
 
@@ -1185,7 +1048,7 @@ def run_flexllmgen(args):
     else:
         tokenizer = AutoTokenizer.from_pretrained("facebook/opt-30b", padding_side="left")
     num_prompts = args.num_gpu_batches * args.gpu_batch_size
-    prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
+    prompt_len, gen_len = args.prompt_len, args.gen_len
 
     # Task and policy
     warmup_inputs = get_test_inputs(32, num_prompts, tokenizer)
@@ -1227,9 +1090,7 @@ def run_flexllmgen(args):
 
         print("benchmark - generate")
         timers("generate").reset()
-        output_ids = model.generate(
-            inputs, max_new_tokens=args.gen_len,
-            debug_mode=args.debug_mode, cut_gen_len=cut_gen_len, verbose=args.verbose)
+        output_ids = model.generate(inputs, max_new_tokens=args.gen_len, verbose=args.verbose)
         costs = timers("generate").costs
     finally:
         env.close_copy_threads()
@@ -1237,10 +1098,7 @@ def run_flexllmgen(args):
     # Log output
     prefill_latency = costs[0]
     prefill_throughput = num_prompts * prompt_len / prefill_latency
-    if cut_gen_len:  # project latency of cut_gen_len to gen_len
-        decode_latency = project_decode_latency(costs, prompt_len, gen_len)
-    else:
-        decode_latency = sum(costs[1:])
+    decode_latency = sum(costs[1:])
     decode_throughput = num_prompts * (gen_len - 1) / max(decode_latency, 1e-10)
     num_generated_tokens = num_prompts * gen_len
     total_latency = prefill_latency + decode_latency
@@ -1259,7 +1117,6 @@ def run_flexllmgen(args):
 
     gpu.print_stats()
     cpu.print_stats()
-    projected = bool(args.debug_mode or cut_gen_len)
 
     if args.log_file == "auto":
         filename = get_filename(args) + ".log"
@@ -1268,30 +1125,24 @@ def run_flexllmgen(args):
 
     log_str = write_benchmark_log(filename,
         opt_config.model_bytes(), cache_size, hidden_size,
-        gpu_peak_mem, projected, prefill_latency, prefill_throughput,
+        gpu_peak_mem, prefill_latency, prefill_throughput,
         decode_latency, decode_throughput, total_latency, total_throughput)
     if args.verbose >= 1:
         print(log_str)
 
 
-def add_parser_arguments(parser):
-    parser.add_argument("--model", type=str, default="facebook/opt-6.7b",
-        help="The model name.")
-    parser.add_argument("--path", type=str, default="~/opt_weights",
-        help="The path to the model weights. If there are no cached weights, "
-             "FlexLLMGen will automatically download them from HuggingFace.")
-    parser.add_argument("--offload-dir", type=str, default="~/flexllmgen_offload_dir",
-        help="The directory to offload tensors. ")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="facebook/opt-6.7b", help="The model name.")
+    parser.add_argument("--path", type=str, default="~/opt_weights", help="The path to the model weights. If there are no cached weights, FlexLLMGen will automatically download them from HuggingFace.")
+    parser.add_argument("--offload-dir", type=str, default="~/flexllmgen_offload_dir", help="The directory to offload tensors. ")
     parser.add_argument("--prompt-len", type=int, default=512)
     parser.add_argument("--gen-len", type=int, default=32)
-    parser.add_argument("--cut-gen-len", type=int,
-        help="Cut generation length for fast debugging.")
-    parser.add_argument("--debug-mode", type=str,
-        choices=["fewer_batch", "breakdown"])
     parser.add_argument("--gpu-batch-size", type=int, default=4)
     parser.add_argument("--num-gpu-batches", type=int, default=1)
-    parser.add_argument("--percent", nargs="+", type=int,
-        default=[100, 0, 100, 0, 100, 0],
+    parser.add_argument("--percent", nargs="+", type=int, default=[100, 0, 100, 0, 100, 0],
         help="Six numbers. They are "
          "the percentage of weight on GPU, "
          "the percentage of weight on CPU, "
@@ -1299,29 +1150,16 @@ def add_parser_arguments(parser):
          "the percentage of attention cache on CPU, "
          "the percentage of activations on GPU, "
          "the percentage of activations on CPU")
-    parser.add_argument("--sep-layer", type=str2bool, nargs='?',
-        const=True, default=True)
-    parser.add_argument("--pin-weight", type=str2bool, nargs="?",
-        const=True, default=True)
+    parser.add_argument("--sep-layer", type=str2bool, nargs='?', const=True, default=True)
+    parser.add_argument("--pin-weight", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--cpu-cache-compute", action="store_true")
     parser.add_argument("--attn-sparsity", type=float, default=1.0)
-    parser.add_argument("--compress-weight", action="store_true",
-        help="Whether to compress weight.")
-    parser.add_argument("--compress-cache", action="store_true",
-        help="Whether to compress cache.")
-
-
+    parser.add_argument("--compress-weight", action="store_true", help="Whether to compress weight.")
+    parser.add_argument("--compress-cache", action="store_true", help="Whether to compress cache.")
     parser.add_argument("--log-file", type=str, default="auto")
     parser.add_argument("--no-log", action="store_true")
     parser.add_argument("--verbose", type=int, default=2)
-
-    parser.add_argument("--overlap", type=str2bool, nargs='?',
-        const=True, default=True)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    add_parser_arguments(parser)
+    parser.add_argument("--overlap", type=str2bool, nargs='?', const=True, default=True)
     args = parser.parse_args()
 
     assert len(args.percent) == 6

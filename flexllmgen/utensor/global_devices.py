@@ -12,10 +12,10 @@ def set_global_disk_device(value):
     global global_disk_device
     global_disk_device = value
 
-def get_global_cpu_device(value):
+def get_global_cpu_device():
     return global_cpu_device
 
-def get_global_disk_device(value):
+def get_global_disk_device():
     return global_disk_device
 
 @dataclass(frozen=True)

@@ -15,10 +15,11 @@ class TorchDevice(Device):
         self.device_type = DeviceType.convert(self.dev.type)
         self.compressed_device = TorchCompressedDevice(self)
 
-        self.links = {}
-
         self.attention_compute_workspace = None
         self.workspace_pt = 0
+
+        self.links = {}
+
 
         if self.device_type == DeviceType.CPU:
             global global_cpu_device
@@ -41,10 +42,12 @@ class TorchDevice(Device):
         pass
 
     def init_attention_compute_workspace(self, config, task, policy):
+        print(f'init_attention_compute_workspace called {self.device_type}')
         if self.device_type != DeviceType.CPU:
             return  # Only CPU requires this fp32 workspace
 
         if not policy.compress_cache:
+            print('not policy.compress_cache')
             b = policy.gpu_batch_size
             n_head = config.n_head
             head_dim = config.input_dim // n_head
@@ -60,6 +63,7 @@ class TorchDevice(Device):
                 v_cache = self.allocate(shape, np.float32, pin_memory=False)
                 self.attention_compute_workspace.append((k_cache, v_cache))
         else:
+            print('policy.compress_cache')
             self.compressed_device.init_attention_compute_workspace(
                 config, task, policy)
 
