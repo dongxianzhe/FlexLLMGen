@@ -3,8 +3,7 @@ import dataclasses
 import torch
 import numpy as np
 
-from flexllmgen.pytorch_backend import (TorchTensor, TorchDevice,
-    DeviceType, general_copy, fix_recursive_import)
+from flexllmgen.utensor import TorchTensor, DeviceType, Device
 from flexllmgen.utils import np_dtype_to_torch_dtype
 
 
@@ -21,7 +20,7 @@ class CompressionConfig:
 class TorchCompressedDevice:
     """Manage tensors stored in a compressed format."""
 
-    def __init__(self, base_device):
+    def __init__(self, base_device: Device):
         self.name = "compressed"
         self.device_type = DeviceType.COMPRESSED
         self.base_device = base_device
@@ -201,42 +200,8 @@ class TorchCompressedDevice:
         return data.view(tensor.shape)
 
 
-def general_copy_compressed(dst, dst_indices, src, src_indices):
-    assert (src.device.device_type == DeviceType.COMPRESSED and
-            dst.device.device_type == DeviceType.COMPRESSED)
-
-    src_data_indices, src_scale_indices = get_compressed_indices(
-        src, src_indices, src.shape)
-
-    dst_data_indices, dst_scale_indices = get_compressed_indices(
-        dst, dst_indices, dst.shape)
-
-    general_copy(dst.data[0], dst_data_indices, src.data[0], src_data_indices)
-    general_copy(dst.data[1], dst_scale_indices, src.data[1], src_scale_indices)
 
 
-def get_compressed_indices(tensor, indices, shape):
-    comp_config = tensor.data[2]
-    group_size, group_dim = comp_config.group_size, comp_config.group_dim
-    assert comp_config.num_bits == 4
-
-    if indices is None:
-        indices = list(slice(0, x) for x in shape[:group_dim+1])
-    else:
-        indices = list(indices) + [slice(0, x) for x in shape[len(indices):]]
-    assert indices[group_dim].start % group_size == 0
-
-    data_indices = list(indices)
-    data_indices[group_dim] = slice(
-        indices[group_dim].start // 2, (indices[group_dim].stop + 1) // 2)
-
-    scale_indices = indices
-    scale_indices.insert(group_dim+1, slice(0, 2))
-    scale_indices[group_dim] = slice(
-        indices[group_dim].start // group_size,
-        (indices[group_dim].stop + group_size - 1) // group_size)
-
-    return data_indices, scale_indices
 
 
 default_cache_config = CompressionConfig(
@@ -330,35 +295,3 @@ def decompress(packed_data, config):
 def compress_and_decompress(tensor, config):
     packed_data = compress(tensor, config)
     return decompress(packed_data, config)
-
-
-def test_simulated_compression():
-    torch.manual_seed(0)
-    a = torch.normal(0, 1, (64, 64, 64), dtype=torch.float16).cuda()
-
-    config = CompressionConfig(
-        num_bits=4, group_size=32, group_dim=0, symmetric=False)
-    packed_data = compress(a, config)
-    b = decompress(packed_data, config)
-    print(a[0])
-    print(b[0])
-
-
-def test_real_compression():
-    torch.manual_seed(0)
-    a = torch.normal(0, 1, (32, 1, 1), dtype=torch.float16).cuda()
-
-    config = CompressionConfig(
-        num_bits=4, group_size=32, group_dim=0, symmetric=False)
-    dev = TorchDevice("cuda:0", 0, 0).compressed_device
-    packed = dev.compress(a, config)
-    b = dev.decompress(packed)
-
-    print(a.flatten())
-    print(b.flatten())
-
-
-if __name__ == "__main__":
-    fix_recursive_import()
-    #test_simulated_compression()
-    test_real_compression()

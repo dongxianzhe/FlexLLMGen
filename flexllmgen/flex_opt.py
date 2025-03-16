@@ -1,36 +1,26 @@
 """
 Usage:
-python3 -m flexllmgen.flex_opt --model facebook/opt-1.3b --gpu-batch-size 32 --percent 100 0 100 0 100 0
+python3 -m flexllmgen.flex_opt --model facebook/opt-1.3b
 """
 
-import argparse
-import dataclasses
 import os
-import pickle
-import time
-from typing import Union, List, Optional
-
+import torch
+import argparse
 import numpy as np
 from tqdm import tqdm
-import torch
+from dataclasses import dataclass
+from typing import Union, List, Optional
 from transformers import AutoTokenizer
 
-from flexllmgen.compression import CompressionConfig
-from flexllmgen.opt_config import OptConfig, get_opt_config, download_opt_weights
-from flexllmgen.pytorch_backend import (TorchDevice, TorchDisk, TorchLink,
-    TorchMixedDevice, DeviceType, general_copy, fix_recursive_import)
+from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy
+from flexllmgen import OptConfig, get_opt_config, download_opt_weights
 from flexllmgen.timer import timers
-from flexllmgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
-    array_1d, array_2d, array_3d, str2bool, project_decode_latency,
-    torch_mem_stats, torch_dtype_to_np_dtype, write_benchmark_log,
-    read_benchmark_log)
+from flexllmgen.utils import (Task, GB, ValueHolder, array_1d, array_2d, array_3d, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log)
 
-fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 
-
-@dataclasses.dataclass(frozen=True)
+@dataclass(frozen=True)
 class Policy:
     gpu_batch_size: int
     num_gpu_batches: int
@@ -1249,7 +1239,7 @@ def run_flexllmgen(args):
     if DUMMY_WEIGHT not in args.path:
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
         show_str = "Outputs:\n" + 70 * '-' + "\n"
-        for i in [0, len(outputs)-1]:
+        for i in range(len(outputs)):
             show_str += f"{i}: {outputs[i]}\n"
             show_str += "-" * 70 + "\n"
         if args.verbose >= 2:
