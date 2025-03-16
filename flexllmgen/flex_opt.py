@@ -15,11 +15,23 @@ from transformers import AutoTokenizer
 from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy
 from flexllmgen import OptConfig, get_opt_config, download_opt_weights
 from flexllmgen.timer import timers
-from flexllmgen.utils import (Task, GB, ValueHolder, array_1d, array_2d, array_3d, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log)
+from flexllmgen.utils import ValueHolder, array_1d, array_2d, array_3d
+from flexllmgen.utils import (GB, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log)
 
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 
+@dataclass(frozen=True)
+class Task:
+    """A generation task."""
+    inputs: Union[np.array, List[List[int]]]
+    prompt_len: int
+    gen_len: int
+    cut_gen_len: Optional[int]
+
+    do_sample: bool
+    temperature: float
+    stop: Optional[int]
 @dataclass(frozen=True)
 class Policy:
     gpu_batch_size: int
@@ -615,13 +627,13 @@ class OptLM:
         num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
 
         # cache[j][k]
-        self.cache_home = array_2d(num_layers, num_gpu_batches, ValueHolder)
-        self.cache_read_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
-        self.cache_write_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
+        self.cache_home = array_2d(num_layers, num_gpu_batches)
+        self.cache_read_buf = array_2d(num_layers, num_gpu_batches)
+        self.cache_write_buf = array_2d(num_layers, num_gpu_batches)
         # weight[j]
-        self.weight_read_buf = array_1d(num_layers, ValueHolder)
+        self.weight_read_buf = array_1d(num_layers)
         # attention_mask[k]
-        self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+        self.attention_mask = array_1d(num_gpu_batches)
 
         self.task = None
         self.init_all_weights()
@@ -785,7 +797,7 @@ class OptLM:
         torch.cuda.synchronize()
 
     def init_all_weights(self):
-        self.weight_home = array_1d(self.num_layers, ValueHolder)
+        self.weight_home = array_1d(self.num_layers)
         for j in range(self.num_layers):
             self.init_weight(j)
 
@@ -857,7 +869,7 @@ class OptLM:
             self.weight_read_buf[j].clear()
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
-        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
+        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches)
 
         # Init cache
         self.set_task(task)

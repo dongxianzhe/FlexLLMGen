@@ -4,7 +4,25 @@ import torch
 import queue
 import threading
 from flexllmgen.utensor import DeviceType, TorchTensor, set_global_disk_device, TorchCompressedDevice
-from flexllmgen.utils import GB, vector_gather,np_dtype_to_torch_dtype
+from flexllmgen.utils import GB, np_dtype_to_torch_dtype
+
+
+def vector_gather(vectors, indices):
+    """
+    Gathers (batched) vectors according to indices.
+    Arguments:
+        vectors: Tensor[S, B, H]
+        indices: Tensor[K, B]
+    Returns:
+        Tensor[K, B, H]
+    """
+    S, B, H = vectors.shape
+    K, B2 = indices.shape
+    assert B == B2
+    indices = indices.reshape(K, B, 1).expand(K, B, H)
+    out = vectors.gather(dim=0, index=indices)
+    return out
+
 
 class TorchDisk:
     """Manage tensors stored on a disk."""
