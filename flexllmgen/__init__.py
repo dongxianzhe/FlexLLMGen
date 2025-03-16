@@ -1,1 +1,0 @@
-from .opt_config import OptConfig, get_opt_config, download_opt_weights

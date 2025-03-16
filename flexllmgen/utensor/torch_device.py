@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from flexllmgen.utensor import DeviceType, CompressionConfig, TorchCompressedDevice, Device, TorchTensor
+from flexllmgen.utensor import DeviceType, CompressionConfig, TorchCompressedDevice, Device, TorchTensor, set_global_cpu_device
 from flexllmgen.utils import np_dtype_to_torch_dtype, GB, cpu_mem_stats
 
 class TorchDevice(Device):
@@ -22,8 +22,7 @@ class TorchDevice(Device):
 
 
         if self.device_type == DeviceType.CPU:
-            global global_cpu_device
-            global_cpu_device = self
+            set_global_cpu_device(self)
 
     def add_link(self, link):
         dst = link.b if link.a == self else link.a
