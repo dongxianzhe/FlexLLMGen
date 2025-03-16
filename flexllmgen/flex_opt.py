@@ -9,7 +9,7 @@ from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, Tor
 from flexllmgen.utils import timers
 from flexllmgen.utils import GB, str2bool, write_benchmark_log
 from flexllmgen.model import OptModelFactory
-from flexllmgen.engine import Policy, Engine
+from flexllmgen.engine import Policy, Engine, Task
 
 def get_filename(args):
     model_size = args.model.split('-')[-1]
@@ -62,11 +62,9 @@ def run_flexllmgen(args):
                     args.overlap, args.sep_layer, args.pin_weight,
                     args.cpu_cache_compute, args.attn_sparsity,
                     args.compress_weight,
-                    CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=0, symmetric=False),
+                    CompressionConfig(num_bits=4, group_size=64, group_dim=0, symmetric=False),
                     args.compress_cache,
-                    CompressionConfig(num_bits=4, group_size=64,
-                                      group_dim=2, symmetric=False))
+                    CompressionConfig(num_bits=4, group_size=64, group_dim=2, symmetric=False))
     assert not (args.compress_cache and args.attn_sparsity < 1.0), "Not implemented"
 
     factory = OptModelFactory(args.model)
@@ -82,10 +80,27 @@ def run_flexllmgen(args):
 
     try:
         print("warmup - generate")
-        output_ids = model.generate(warmup_inputs, max_new_tokens=1, verbose=args.verbose)
+        task = Task(
+            inputs=warmup_inputs,
+            prompt_len=len(warmup_inputs[0]),
+            gen_len=2,
+            do_sample=False,
+            temperature=1.0,
+            stop=None,
+        )
+        output_ids = model.generate(task)
+
+        task = Task(
+            inputs=inputs,
+            prompt_len=len(inputs[0]),
+            gen_len=args.gen_len,
+            do_sample=False,
+            temperature=1.0,
+            stop=None,
+        )
         print("benchmark - generate")
         timers("generate").reset()
-        output_ids = model.generate(inputs, max_new_tokens=args.gen_len, verbose=args.verbose)
+        output_ids = model.generate(task)
         costs = timers("generate").costs
     finally:
         env.close_copy_threads()

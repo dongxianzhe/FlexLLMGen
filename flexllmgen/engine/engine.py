@@ -301,22 +301,7 @@ class Engine:
         val.load_from_np((input_ids != self.config.pad_token_id))
         self.attention_mask[k].store(val)
 
-    def generate(self,
-                 inputs: Union[np.array, List[List[int]]],
-                 max_new_tokens: int = 32,
-                 do_sample: bool = False,
-                 temperature: float = 1.0,
-                 stop: Optional[int] = None,
-                 verbose: int = 0):
-        task = Task(
-            inputs=inputs,
-            prompt_len=len(inputs[0]),
-            gen_len=max_new_tokens,
-            do_sample=do_sample,
-            temperature=temperature,
-            stop=stop,
-        )
-        num_layers = self.num_layers
+    def generate(self, task: Task):
         num_gpu_batches = self.num_gpu_batches
         gpu_batch_size = self.policy.gpu_batch_size
         overlap = self.policy.overlap
@@ -389,88 +374,6 @@ class Engine:
                     self.store_cache(i, j, k, overlap=False)
             timers("generate").stop()
 
-    def generation_loop_debug_normal(self):
-        execute_num_batches = 20
-        batch_ct = 0
-        pbar = tqdm(total=execute_num_batches)
-        timers("prefill_total").reset()
-        timers("decoding_gpu_batch").reset()
-
-        timers("load_weight").reset()
-        timers("load_cache_prefill").reset()
-        timers("load_cache_decoding").reset()
-        timers("store_cache_prefill").reset()
-        timers("store_cache_decoding").reset()
-        timers("compute_layer_prefill").reset()
-        timers("compute_layer_decoding").reset()
-        load_weight_timer = timers("load_weight")
-
-        for i in range(self.execute_gen_len):
-            if i == 0:
-                timers("prefill_total").start()
-                load_cache_timer = timers("load_cache_prefill")
-                store_cache_timer = timers("store_cache_prefill")
-                compute_layer_timer = timers("compute_layer_prefill")
-            else:
-                load_cache_timer = timers("load_cache_decoding")
-                store_cache_timer = timers("store_cache_decoding")
-                compute_layer_timer = timers("compute_layer_decoding")
-
-            for k in range(self.num_gpu_batches):
-                self.update_attention_mask(i, k)
-
-            for j in range(self.num_layers):
-                if i > 0: timers("decoding_gpu_batch").start()
-
-                load_weight_timer.start(self.sync)
-                for k in range(self.num_gpu_batches):
-                    self.load_weight(i, j, k)
-                load_weight_timer.stop(self.sync)
-
-                for k in range(self.num_gpu_batches):
-                    load_cache_timer.start(self.sync)
-                    self.load_cache(i, j, k)
-                    load_cache_timer.stop(self.sync)
-                    self.load_hidden(i, j, k)
-                    compute_layer_timer.start(self.sync)
-                    self.compute_layer(i, j, k)
-                    compute_layer_timer.stop(self.sync)
-                    self.store_hidden(i, j, k)
-                    store_cache_timer.start(self.sync)
-                    self.store_cache(i, j, k)
-                    store_cache_timer.stop(self.sync)
-
-                if i > 0:
-                    timers("decoding_gpu_batch").stop()
-                    pbar.update(1)
-                    batch_ct += 1
-                if batch_ct >= execute_num_batches: break
-            if batch_ct >= execute_num_batches: break
-            if i == 0: timers("prefill_total").stop(self.sync)
-
-        # Convert "decoding_gpu_batch" timer to "generate" timer
-        batch_cost = np.mean(timers("decoding_gpu_batch").costs[10:])
-        for i in range(self.execute_gen_len):
-            if i == 0:
-                timers("generate").costs.append(timers("prefill_total").costs[0])
-            else:
-                timers("generate").costs.append(self.num_layers * batch_cost)
-
-        # Debug the costs of individual functions
-        print(f"#layers: {self.num_layers}")
-
-        print(f"#batches prefill:  "
-              f"{self.num_layers * self.num_gpu_batches}")
-        print(f"#batches decoding: "
-              f"{(self.task.gen_len - 1) * self.num_layers * self.num_gpu_batches}")
-        print(f"load_weight            (per-layer)"
-              f": {np.mean(timers('load_weight').costs):.6f} s")
-        for stage in ["prefill", "decoding"]:
-            for func in ["load_cache", "store_cache", "compute_layer"]:
-                name = func + "_" + stage
-                costs = timers(name).costs
-                print(f"{name:22s} (per-batch): {np.mean(costs):.6f} s")
-
     def generation_loop_overlap_single_batch(self):
         # Prologue
         for k in range(self.num_gpu_batches):
@@ -493,6 +396,34 @@ class Engine:
 
             if self.task.stop and np.all(self.stopped):
                 break
+
+    def generation_loop_overlap_multi_batch(self):
+        # Prologue
+        for k in range(self.num_gpu_batches):
+            self.load_weight(0, 0, k)
+        self.load_hidden(0, 0, 0)
+        self.sync()
+
+        # Generate
+        for i in range(self.execute_gen_len):
+            timers("generate").start()
+            for k in range(self.num_gpu_batches):
+                self.update_attention_mask(i, k)
+            for j in range(self.num_layers):
+                for k in range(self.num_gpu_batches):
+                    self.load_weight(i, j+1, k)
+                    self.load_cache(i, j, k+1)
+                    self.store_hidden(i, j, k-1)
+                    self.load_hidden(i, j, k+1)
+                    self.compute_layer(i, j, k)
+                    self.store_cache(i, j, k-1)
+                    self.sync()
+            timers("generate").stop()
+
+        # Epilogue
+        self.store_hidden(
+            self.execute_gen_len-1, self.num_layers-1, self.num_gpu_batches-1)
+
 
     def __del__(self):
         self.delete_all_weights()
