@@ -14,9 +14,9 @@ from transformers import AutoTokenizer
 
 from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy
 from flexllmgen import OptConfig, get_opt_config, download_opt_weights
-from flexllmgen.timer import timers
+from flexllmgen.utils import timers
 from flexllmgen.utils import ValueHolder, array_1d, array_2d, array_3d
-from flexllmgen.utils import (GB, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log)
+from flexllmgen.utils import GB, str2bool, project_decode_latency, torch_dtype_to_np_dtype, write_benchmark_log
 
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
@@ -32,6 +32,8 @@ class Task:
     do_sample: bool
     temperature: float
     stop: Optional[int]
+
+
 @dataclass(frozen=True)
 class Policy:
     gpu_batch_size: int
