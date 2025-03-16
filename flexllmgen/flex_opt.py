@@ -1,6 +1,6 @@
 """
 Usage:
-python3 -m flexllmgen.flex_opt --model facebook/opt-1.3b
+python3 -m flexllmgen.flex_opt --model facebook/opt-1.3b --percent 0 100 100 0 100 0
 """
 
 import os
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Union, List, Optional
 from transformers import AutoTokenizer
 
+from flexllmgen.layer import Layer
 from flexllmgen.utensor import CompressionConfig, ExecutionEnv, TorchDevice, TorchDisk, TorchMixedDevice, general_copy
 from flexllmgen import OptConfig, get_opt_config, download_opt_weights
 from flexllmgen.utils import timers
@@ -135,7 +136,7 @@ def init_weight_list(weight_specs, policy, env):
     return ret
 
 
-class InputEmbed:
+class InputEmbed(Layer):
     def __init__(self, config, env, policy):
         self.config = config
         self.env = env
@@ -163,11 +164,10 @@ class InputEmbed:
 
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(self, weight_home, weight_read_buf):
         w_token, w_pos = weight_home.val
-        if k == 0:
-            dst = self.weight_load_dst
-            weight_read_buf.store((w_token.smart_copy(dst), w_pos.smart_copy(dst)))
+        dst = self.weight_load_dst
+        weight_read_buf.store((w_token.smart_copy(dst), w_pos.smart_copy(dst)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -199,7 +199,7 @@ class InputEmbed:
         hidden.val = h
 
 
-class OutputEmbed:
+class OutputEmbed(Layer):
     def __init__(self, config, env, policy):
         self.config = config
         self.env = env
@@ -229,13 +229,12 @@ class OutputEmbed:
 
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(self, weight_home, weight_read_buf):
         w_ln, b_ln, w_token = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((w_ln.smart_copy(dst2), b_ln.smart_copy(dst2),
-                w_token.smart_copy(dst1)))
+        dst1 = self.weight_load_dst
+        dst2 = self.compute
+        weight_read_buf.store((w_ln.smart_copy(dst2), b_ln.smart_copy(dst2),
+            w_token.smart_copy(dst1)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -260,12 +259,13 @@ class OutputEmbed:
         else:
             (w_ln, _), (b_ln, _), (w_token, _) = weight_read_buf.val
 
-        h = self.compute.opt_output_embed(h, w_ln, b_ln, w_token, donate,
-            self.task.do_sample, self.task.temperature)
+        # todo compute function from device to layer
+        h = self.compute.opt_output_embed(h, w_ln, b_ln, w_token, donate, self.task.do_sample, self.task.temperature)
+        
         hidden.val = h
 
 
-class SelfAttention:
+class SelfAttention(Layer):
     def __init__(self, config, env, policy, layer_id):
         self.config = config
         self.env = env
@@ -310,17 +310,16 @@ class SelfAttention:
         weights = init_weight_list(weight_specs, self.policy, self.env)
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(self, weight_home, weight_read_buf):
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((
-                w_q.smart_copy(dst1), b_q.smart_copy(dst2),
-                w_k.smart_copy(dst1), b_k.smart_copy(dst2),
-                w_v.smart_copy(dst1), b_v.smart_copy(dst2),
-                w_out.smart_copy(dst1), b_out.smart_copy(dst2),
-                w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
+        dst1 = self.weight_load_dst
+        dst2 = self.compute
+        weight_read_buf.store((
+            w_q.smart_copy(dst1), b_q.smart_copy(dst2),
+            w_k.smart_copy(dst1), b_k.smart_copy(dst2),
+            w_v.smart_copy(dst1), b_v.smart_copy(dst2),
+            w_out.smart_copy(dst1), b_out.smart_copy(dst2),
+            w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         if self.policy.cache_gpu_percent == 100:
@@ -463,7 +462,7 @@ class SelfAttention:
         hidden.val = h
 
 
-class MLP:
+class MLP(Layer):
     def __init__(self, config, env, policy, layer_id):
         self.config = config
         self.env = env
@@ -498,15 +497,14 @@ class MLP:
         weights = init_weight_list(weight_specs, self.policy, self.env)
         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(self, weight_home, weight_read_buf):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((
-                wi.smart_copy(dst1), bi.smart_copy(dst2),
-                wo.smart_copy(dst1), bo.smart_copy(dst2),
-                w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
+        dst1 = self.weight_load_dst
+        dst2 = self.compute
+        weight_read_buf.store((
+            wi.smart_copy(dst1), bi.smart_copy(dst2),
+            wo.smart_copy(dst1), bo.smart_copy(dst2),
+            w_ln.smart_copy(dst2), b_ln.smart_copy(dst2)))
 
     def init_cache_one_gpu_batch(self, cache_home):
         pass  # do nothing
@@ -537,7 +535,7 @@ class MLP:
         hidden.val = h
 
 
-class TransformerLayer:
+class TransformerLayer(Layer):
     def __init__(self, config, env, policy, i):
         self.attention = SelfAttention(config, env, policy, i)
         self.mlp = MLP(config, env, policy, i)
@@ -554,13 +552,12 @@ class TransformerLayer:
         self.mlp.init_weight(home2, path)
         weight_home.store((home1, home2))
 
-    def load_weight(self, weight_home, weight_read_buf, k):
+    def load_weight(self, weight_home, weight_read_buf):
         read_buf1, read_buf2 = ValueHolder(), ValueHolder()
         home1, home2 = weight_home.val
-        self.attention.load_weight(home1, read_buf1, k)
-        self.mlp.load_weight(home2, read_buf2, k)
-        if k == 0:
-            weight_read_buf.store((read_buf1, read_buf2))
+        self.attention.load_weight(home1, read_buf1)
+        self.mlp.load_weight(home2, read_buf2)
+        weight_read_buf.store((read_buf1, read_buf2))
 
     def init_cache_one_gpu_batch(self, cache_home):
         self.attention.init_cache_one_gpu_batch(cache_home)
@@ -665,9 +662,11 @@ class OptLM:
         # Load from weight_home to weight_read_buf
         if overlap:
             with torch.cuda.stream(self.load_weight_stream):
-                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+                if k == 0:
+                    self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
         else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+            if k == 0:
+                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j])
 
     def delete_weight(self, j, k):
         if k == 0:
@@ -852,8 +851,7 @@ class OptLM:
         self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
 
         # Output token ids
-        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len),
-            self.config.pad_token_id, dtype=np.int32)
+        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len), self.config.pad_token_id, dtype=np.int32)
         self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
         self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
         assert gpu_batch_size * num_gpu_batches == len(task.inputs)
