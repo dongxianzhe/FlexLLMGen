@@ -1,4 +1,5 @@
 import os
+from flexllmgen.utensor import TorchTensor
 from flexllmgen.layer import Layer
 from flexllmgen.layer.weight_init_utils import init_weight_list
 
@@ -18,7 +19,7 @@ class MLP(Layer):
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def init_weight(self, path) -> list[TorchTensor]:
         h, dtype = (self.config.input_dim, self.config.dtype)
         path = os.path.join(os.path.join(path, f"decoder.layers.{self.layer_id}."))
         weight_specs = [
@@ -35,8 +36,7 @@ class MLP(Layer):
             # b_ln
             ((h,), dtype, path + "final_layer_norm.bias"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        weight_home.store(weights)
+        return init_weight_list(weight_specs, self.policy, self.env)
 
     def load_weight(self, weight_home, weight_read_buf):
         wi, bi, wo, bo, w_ln, b_ln = weight_home.val

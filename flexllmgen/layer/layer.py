@@ -1,7 +1,8 @@
+from flexllmgen.utensor import TorchTensor
 class Layer:
     def set_task(self, task):
         raise NotImplementedError
-    def init_weight(self, weight_home, path):
+    def init_weight(self, path: str) -> list[TorchTensor]:
         raise NotImplementedError
     def load_weight(self, weight_home, weight_read_buf):
         raise NotImplementedError

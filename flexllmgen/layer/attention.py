@@ -1,5 +1,5 @@
 import os
-from flexllmgen.utensor import DeviceType, general_copy
+from flexllmgen.utensor import DeviceType, general_copy, TorchTensor
 from flexllmgen.layer import Layer
 from flexllmgen.layer.weight_init_utils import init_weight_list
 
@@ -21,7 +21,7 @@ class SelfAttention(Layer):
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
+    def init_weight(self, path) -> list[TorchTensor]:
         h, dtype = (self.config.input_dim, self.config.dtype)
         path = os.path.join(os.path.join(path, f"decoder.layers.{self.layer_id}.self_attn"))
         weight_specs = [
@@ -46,8 +46,7 @@ class SelfAttention(Layer):
             # b_ln
             ((h,), dtype, path + "_layer_norm.bias"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        weight_home.store(weights)
+        return init_weight_list(weight_specs, self.policy, self.env)
 
     def load_weight(self, weight_home, weight_read_buf):
         w_q, b_q, w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln = weight_home.val

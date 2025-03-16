@@ -1,7 +1,7 @@
 import os
+from flexllmgen.utensor import TorchTensor
 from flexllmgen.layer import Layer
 from flexllmgen.layer.weight_init_utils import init_weight_list
-
 
 class OutputEmbed(Layer):
     def __init__(self, config, env, policy):
@@ -17,9 +17,8 @@ class OutputEmbed(Layer):
     def set_task(self, task):
         self.task = task
 
-    def init_weight(self, weight_home, path):
-        v, h, dtype = (self.config.vocab_size, self.config.input_dim,
-            self.config.dtype)
+    def init_weight(self, path) -> list[TorchTensor]:
+        v, h, dtype = (self.config.vocab_size, self.config.input_dim, self.config.dtype)
         path = os.path.join(path, "")
         weight_specs = [
             # w_ln
@@ -29,9 +28,7 @@ class OutputEmbed(Layer):
             # w_token
             ((v, h), dtype, path + "decoder.embed_tokens.weight"),
         ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-
-        weight_home.store(weights)
+        return init_weight_list(weight_specs, self.policy, self.env)
 
     def load_weight(self, weight_home, weight_read_buf):
         w_ln, b_ln, w_token = weight_home.val

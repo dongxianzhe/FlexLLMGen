@@ -115,21 +115,25 @@ class Engine:
         self.attention_mask = array_1d(self.num_gpu_batches)
 
         self.task = None
-        self.init_all_weights()
+
+        self.weight_home = self._init_all_weights()
+
+    def _init_all_weights(self) -> list[ValueHolder]:
+        weight_home = array_1d(self.num_layers)
+
+        expanded_path = os.path.abspath(os.path.expanduser(os.path.join(self.path, f"{self.config.name}-np")))
+        for j in range(self.num_layers):
+            check_path = os.path.join(expanded_path, "decoder.embed_positions.weight")
+            if not os.path.exists(check_path):
+                download_weights(self.config.name, self.path)
+            weight_home[j].store(self.layers[j].init_weight(expanded_path))
+        return weight_home
 
     def set_task(self, task):
         self.task = task
         for l in self.layers:
             l.set_task(task)
 
-    def init_weight(self, j):
-        expanded_path = os.path.abspath(os.path.expanduser(
-            os.path.join(self.path, f"{self.config.name}-np")))
-        check_path = os.path.join(expanded_path, "decoder.embed_positions.weight")
-        if not os.path.exists(check_path):
-            download_weights(self.config.name, self.path)
-
-        self.layers[j].init_weight(self.weight_home[j], expanded_path)
 
     def load_weight(self, i, j, k, overlap=True):
         # Handle corner cases
@@ -271,10 +275,6 @@ class Engine:
         self.env.disk.synchronize()
         torch.cuda.synchronize()
 
-    def init_all_weights(self):
-        self.weight_home = array_1d(self.num_layers)
-        for j in range(self.num_layers):
-            self.init_weight(j)
 
     def delete_all_weights(self):
         for j in range(self.num_layers):

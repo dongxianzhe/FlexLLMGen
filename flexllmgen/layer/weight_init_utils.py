@@ -1,4 +1,5 @@
 import numpy as np
+from flexllmgen.utensor import TorchTensor
 
 def get_choice(cur_percent, percents, choices):
     percents = np.cumsum(percents)
@@ -10,7 +11,7 @@ def get_choice(cur_percent, percents, choices):
     return choices[-1]
 
 
-def init_weight_list(weight_specs, policy, env):
+def init_weight_list(weight_specs, policy, env) -> list[TorchTensor]:
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     dev_choices = [env.disk, env.cpu, env.gpu]
 
