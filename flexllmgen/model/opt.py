@@ -124,7 +124,15 @@ class OptModelFactory:
 
     def get_layers(self) -> list[Layer]:
         layers = []
-        layers.append(InputEmbed(self.config, self.env, self.policy))
+        layers.append(InputEmbed(
+            vocab_size = self.config.vocab_size, 
+            hidden_size = self.config.input_dim, 
+            max_seq_len = self.config.max_seq_len, 
+            pad_token_id = self.config.pad_token_id, 
+            dtype=self.config.dtype, 
+            env=self.env, 
+            policy=self.policy,
+        ))
         for i in range(self.config.num_hidden_layers):
             if self.policy.sep_layer:
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
